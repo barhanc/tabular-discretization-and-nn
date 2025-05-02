@@ -6,13 +6,6 @@ niż sieci neuronowe. Rozdział 5 w artykule [1] prezentuje doświadczalną anal
 mogą prowadzić do tego faktu. Celem projektu jest zbadanie jak dyskretyzacja danych wpływa na
 powyższe właściwości i wynikające z nich problemy.
 
-
-TODO
-----
-
-* Eksperymenty NN + CatBoost + Discretization + no-Discretization
-
-
 References
 ----------
 
