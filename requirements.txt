@@ -4,5 +4,4 @@ pandas
 scikit-learn
 matplotlib
 seaborn
-feature-engine
-catboost
+optuna
