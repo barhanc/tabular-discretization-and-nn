@@ -1,42 +1,80 @@
 import numpy as np
-
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
 
 from copy import deepcopy
+from warnings import warn
+from numbers import Integral, Real
 from typing import Optional, Literal
 
-from tqdm import trange
 from numpy.typing import NDArray
+from numpy.random import RandomState
 
+from tqdm import trange
 from torch import Tensor
 from torch.utils.data import DataLoader, TensorDataset
 
-from sklearn.utils import check_array, check_X_y
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from sklearn.base import BaseEstimator, ClassifierMixin
-
 from rtdl_num_embeddings import PiecewiseLinearEmbeddings, compute_bins
 
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
 
-def _train_clf(
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.utils._param_validation import Interval, StrOptions
+from sklearn.utils.multiclass import check_classification_targets
+from sklearn.utils.validation import check_random_state, check_is_fitted, validate_data
+
+__all__ = [
+    "MLPClassifier",
+    "QPLEMLPClassifier",
+]
+
+
+class MLP(nn.Module):
+    def __init__(
+        self,
+        dim_in: int,
+        dim_out: int,
+        dim_hid: int,
+        num_hid: int,
+        dropout: float,
+    ):
+        super().__init__()
+
+        self.layers = []
+        self.layers.append(nn.Linear(dim_in, dim_hid))
+        self.layers.append(nn.BatchNorm1d(dim_hid))
+        self.layers.append(nn.ReLU())
+        self.layers.append(nn.Dropout(p=dropout))
+
+        for _ in range(num_hid):
+            self.layers.append(nn.Linear(dim_hid, dim_hid))
+            self.layers.append(nn.BatchNorm1d(dim_hid))
+            self.layers.append(nn.ReLU())
+            self.layers.append(nn.Dropout(p=dropout))
+
+        self.layers.append(nn.Linear(dim_hid, dim_out))
+        self.layers = nn.Sequential(*self.layers)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.layers(x)
+
+
+def _train_model(
     model: nn.Module,
     device: Literal["cpu", "cuda", "mps"],
     dataloaders: dict[Literal["train", "valid"], DataLoader],
     lr: float,
     max_iter: int,
-    patience: Optional[int] = None,
+    patience: int,
+    regression: bool = False,
     verbose: bool = False,
-) -> dict[Literal["train", "valid"], list[float]]:
-
+) -> tuple[dict[Literal["train", "valid"], list[float]], int]:
+    # Training loop
     model.to(device)
 
-    # --- Training loop
-    criterion = F.cross_entropy
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.MSELoss() if regression else nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     best_acc = 0.0
     best_model_params = None
@@ -99,306 +137,302 @@ def _train_clf(
     # Load best model params
     model.load_state_dict(best_model_params)
 
-    return acc_history
+    return acc_history, iter + 1
 
 
-class BinnedMLPClassifier(nn.Module, ClassifierMixin, BaseEstimator):
+class MLPClassifier(ClassifierMixin, BaseEstimator):
+    _parameter_constraints = {
+        "dim_hid": [Interval(Integral, 1, None, closed="left")],
+        "num_hid": [Interval(Integral, 1, None, closed="left")],
+        "dropout": [Interval(Real, 0, 1, closed="left")],
+        "lr": [Interval(Real, 0, None, closed="left")],
+        "max_iter": [Interval(Integral, 1, None, closed="left")],
+        "batch_size": [Interval(Integral, 1, None, closed="left")],
+        "valid_frac": [Interval(Real, 0, 1, closed="left")],
+        "patience": [Interval(Integral, 1, None, closed="left")],
+        "random_state": ["random_state"],
+        "verbose": ["boolean"],
+        "device": [StrOptions({"cpu", "cuda", "mps", "auto"})],
+    }
+
     def __init__(
         self,
-        dim_emb: int,
-        dim_hid: int,
-        num_hid: int,
-        num_bins: int,
-        dropout: float,
-        lr: float,
-        max_iter: int,
-        batch_size: int,
-        valid_frac: float,
-        patience: Optional[int] = None,
+        dim_hid: int = 128,
+        num_hid: int = 2,
+        dropout: float = 0.2,
+        lr: float = 3e-4,
+        max_iter: int = 200,
+        batch_size: int = 256,
+        valid_frac: float = 0.2,
+        patience: int = 40,
+        random_state: Optional[int | RandomState] = None,
         verbose: bool = False,
+        device: Literal["cpu", "cuda", "mps", "auto"] = "auto",
     ):
         super().__init__()
 
-        # --- Perform basic sanity checks
-        assert isinstance(dim_emb, int) and dim_hid > 0
-        assert isinstance(dim_hid, int) and dim_hid > 0
-        assert isinstance(num_hid, int) and num_hid >= 0
-        assert isinstance(dropout, float) and 0 <= dropout < 1
-        assert isinstance(lr, float) and lr > 0
-        assert isinstance(max_iter, int) and max_iter > 0
-        assert isinstance(batch_size, int) and batch_size > 0
-        assert isinstance(valid_frac, float) and 0 < valid_frac < 1
-        assert patience is None or (isinstance(patience, int) and patience > 0)
-
-        # Network architecture
         self.dim_hid: int = dim_hid
         self.num_hid: int = num_hid
 
-        # Piecewise Linear Embedding params
-        self.dim_emb: int = dim_emb
-        self.num_bins: int = num_bins
-
-        # Training hyperparams
         self.lr: float = lr
         self.dropout: float = dropout
         self.max_iter: int = max_iter
         self.batch_size: int = batch_size
         self.valid_frac: float = valid_frac
-        self.patience: Optional[int] = patience
+        self.patience: int = patience
 
-        # Other params
+        self.random_state: Optional[int | RandomState] = random_state
+        self.device: Literal["cpu", "cuda", "mps", "auto"] = device
         self.verbose: bool = verbose
 
-    def _build(self):
-        self.device: Literal["cuda", "mps", "cpu"]
+    def fit(self, X, y):
+        X, y = validate_data(self, X, y, accept_sparse=False, reset=True)
+        check_classification_targets(y)
+        X, y = np.array(X), np.array(y)
 
-        if torch.cuda.is_available():
-            self.device = "cuda"
-        elif torch.mps.is_available():
-            self.device = "mps"
-        else:
-            self.device = "cpu"
+        self.label_encoder_: LabelEncoder = LabelEncoder().fit(y)
+        self.classes_: NDArray = self.label_encoder_.classes_
+        self.n_classes_: int = len(self.classes_)
 
-        self.embedding = PiecewiseLinearEmbeddings(self.bins, self.dim_emb, activation=False, version="B")
+        self._random_state: RandomState = check_random_state(self.random_state)
 
-        self.layers = []
-        self.layers.append(nn.Linear(self.dim_emb * self.dim_in, self.dim_hid))
-        self.layers.append(nn.BatchNorm1d(self.dim_hid))
-        self.layers.append(nn.ReLU())
-        self.layers.append(nn.Dropout(p=self.dropout))
-
-        for _ in range(self.num_hid):
-            self.layers.append(nn.Linear(self.dim_hid, self.dim_hid))
-            self.layers.append(nn.BatchNorm1d(self.dim_hid))
-            self.layers.append(nn.ReLU())
-            self.layers.append(nn.Dropout(p=self.dropout))
-
-        self.layers.append(nn.Linear(self.dim_hid, self.dim_out))
-        self.layers = nn.Sequential(*self.layers)
-
-        self.to(self.device)
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.embedding(x).flatten(1)
-        return self.layers(x)
-
-    def fit(self, X: NDArray, y: NDArray):
-        X = np.array(X)
-        y = np.array(y)
-        check_X_y(X, y)
-
-        self.dim_in = X.shape[1]
-        self.dim_out = len(np.unique(y))
-
-        # --- Get validation data
         X_train, X_valid, y_train, y_valid = train_test_split(
             X,
             y,
             test_size=self.valid_frac,
+            random_state=self._random_state,
             shuffle=True,
             stratify=y,
         )
 
-        # --- Map labels to int
-        self.label_encoder_ = LabelEncoder().fit(y)
         y_train = self.label_encoder_.transform(y_train)
         y_valid = self.label_encoder_.transform(y_valid)
 
-        # --- To Tensor
+        self.device_: Literal["cuda", "mps", "cpu"]
+
+        if self.device == "auto":
+            if torch.cuda.is_available():
+                self.device_ = "cuda"
+            elif torch.mps.is_available():
+                self.device_ = "mps"
+            else:
+                self.device_ = "cpu"
+        else:
+            if self.device == "cuda" and not torch.cuda.is_available():
+                raise ValueError(f"{self.device=} passed but CUDA not available!")
+            if self.device == "mps" and not torch.mps.is_available():
+                raise ValueError(f"{self.device=} passed but MPS not available!")
+            self.device_ = self.device
+
+        torch.manual_seed(self._random_state.randint(2**32))
+
         X_train = torch.tensor(X_train).float()
         X_valid = torch.tensor(X_valid).float()
         y_train = torch.tensor(y_train)
         y_valid = torch.tensor(y_valid)
 
-        # --- Build network
-        self.bins = compute_bins(X=X_train, n_bins=self.num_bins)
-        self._build()
-
-        # --- Create dataloaders
         dataloaders = {
-            "train": DataLoader(TensorDataset(X_train, y_train), batch_size=self.batch_size, shuffle=True),
-            "valid": DataLoader(TensorDataset(X_valid, y_valid), batch_size=self.batch_size, shuffle=True),
+            "train": DataLoader(TensorDataset(X_train, y_train), self.batch_size, shuffle=True),
+            "valid": DataLoader(TensorDataset(X_valid, y_valid), self.batch_size, shuffle=True),
         }
-        # --- Train clf
-        self.acc_history_ = _train_clf(
-            model=self,
-            device=self.device,
+
+        self._model: nn.Module = MLP(
+            dim_in=self.n_features_in_,
+            dim_out=self.n_classes_,
+            dim_hid=self.dim_hid,
+            num_hid=self.num_hid,
+            dropout=self.dropout,
+        )
+
+        self.acc_history_, self.n_iter_ = _train_model(
+            model=self._model,
+            device=self.device_,
             dataloaders=dataloaders,
             lr=self.lr,
             max_iter=self.max_iter,
             patience=self.patience,
+            regression=False,
             verbose=self.verbose,
         )
 
         return self
 
-    @torch.no_grad()
     def predict(self, X: NDArray) -> NDArray:
-        # --- Perform basic sanity checks
+        check_is_fitted(self)
+        X = validate_data(self, X, reset=False, accept_sparse=False, accept_large_sparse=False)
         X = np.array(X)
-        check_array(X)
 
-        # --- Predict
-        self.eval()
-
-        logits = self(torch.tensor(X).float().to(self.device))
-        logits = logits.to("cpu").numpy()
-        labels = np.argmax(logits, axis=1)
-
+        self._model.to(self.device_)
+        self._model.eval()
+        with torch.no_grad():
+            logits = self._model(torch.tensor(X).float().to(self.device_))
+            logits = logits.to("cpu").numpy()
+            labels = np.argmax(logits, axis=1)
         return self.label_encoder_.inverse_transform(labels)
 
 
-class RawMLPClassifier(nn.Module, ClassifierMixin, BaseEstimator):
+class QPLEMLPClassifier(ClassifierMixin, BaseEstimator):
+    _parameter_constraints = {
+        "dim_hid": [Interval(Integral, 1, None, closed="left")],
+        "dim_emb": [Interval(Integral, 1, None, closed="left")],
+        "num_hid": [Interval(Integral, 1, None, closed="left")],
+        "num_bins": [Interval(Integral, 1, None, closed="neither")],
+        "dropout": [Interval(Real, 0, 1, closed="left")],
+        "lr": [Interval(Real, 0, None, closed="left")],
+        "max_iter": [Interval(Integral, 1, None, closed="left")],
+        "batch_size": [Interval(Integral, 1, None, closed="left")],
+        "valid_frac": [Interval(Real, 0, 1, closed="left")],
+        "patience": [Interval(Integral, 1, None, closed="left")],
+        "random_state": ["random_state"],
+        "verbose": ["boolean"],
+        "device": [StrOptions({"cpu", "cuda", "mps", "auto"})],
+    }
+
     def __init__(
         self,
-        dim_hid: int,
-        num_hid: int,
-        dropout: float,
-        lr: float,
-        max_iter: int,
-        batch_size: int,
-        valid_frac: float,
-        patience: Optional[int] = None,
+        dim_hid: int = 128,
+        dim_emb: int = 8,
+        num_hid: int = 2,
+        num_bins: int = 64,
+        dropout: float = 0.2,
+        lr: float = 3e-4,
+        max_iter: int = 200,
+        batch_size: int = 256,
+        valid_frac: float = 0.2,
+        patience: int = 40,
+        random_state: Optional[int | RandomState] = None,
         verbose: bool = False,
+        device: Literal["cpu", "cuda", "mps", "auto"] = "auto",
     ):
         super().__init__()
 
-        # --- Perform basic sanity checks
-        assert isinstance(dim_hid, int) and dim_hid > 0
-        assert isinstance(num_hid, int) and num_hid >= 0
-        assert isinstance(dropout, float) and 0 <= dropout < 1
-        assert isinstance(lr, float) and lr > 0
-        assert isinstance(max_iter, int) and max_iter > 0
-        assert isinstance(batch_size, int) and batch_size > 0
-        assert isinstance(valid_frac, float) and 0 < valid_frac < 1
-        assert patience is None or (isinstance(patience, int) and patience > 0)
-
-        # Network architecture
         self.dim_hid: int = dim_hid
+        self.dim_emb: int = dim_emb
         self.num_hid: int = num_hid
+        self.num_bins: int = num_bins
 
-        # Training hyperparams
         self.lr: float = lr
         self.dropout: float = dropout
         self.max_iter: int = max_iter
         self.batch_size: int = batch_size
         self.valid_frac: float = valid_frac
-        self.patience: Optional[int] = patience
+        self.patience: int = patience
 
-        # Other params
+        self.random_state: Optional[int | RandomState] = random_state
+        self.device: Literal["cpu", "cuda", "mps", "auto"] = device
         self.verbose: bool = verbose
 
-    def _build(self):
-        self.device: Literal["cuda", "mps", "cpu"]
-        if torch.cuda.is_available():
-            self.device = "cuda"
-        elif torch.mps.is_available():
-            self.device = "mps"
-        else:
-            self.device = "cpu"
+    def fit(self, X, y):
+        X, y = validate_data(self, X, y, accept_sparse=False, reset=True)
+        check_classification_targets(y)
+        X, y = np.array(X), np.array(y)
 
-        self.layers = []
-        self.layers.append(nn.Linear(self.dim_in, self.dim_hid))
-        self.layers.append(nn.BatchNorm1d(self.dim_hid))
-        self.layers.append(nn.ReLU())
-        self.layers.append(nn.Dropout(p=self.dropout))
+        self.label_encoder_: LabelEncoder = LabelEncoder().fit(y)
+        self.classes_: NDArray = self.label_encoder_.classes_
+        self.n_classes_: int = len(self.classes_)
 
-        for _ in range(self.num_hid):
-            self.layers.append(nn.Linear(self.dim_hid, self.dim_hid))
-            self.layers.append(nn.BatchNorm1d(self.dim_hid))
-            self.layers.append(nn.ReLU())
-            self.layers.append(nn.Dropout(p=self.dropout))
+        self._random_state: RandomState = check_random_state(self.random_state)
 
-        self.layers.append(nn.Linear(self.dim_hid, self.dim_out))
-        self.layers = nn.Sequential(*self.layers)
-
-        self.to(self.device)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.layers(x)
-
-    def fit(self, X: NDArray, y: NDArray):
-        X = np.array(X)
-        y = np.array(y)
-        check_X_y(X, y)
-
-        # --- Set additional fields
-        self.dim_in: int = X.shape[1]
-        self.dim_out: int = len(np.unique(y))
-        self.acc_history_: Optional[dict[str, list[float]]] = None
-        self.label_encoder_: Optional[LabelEncoder] = None
-
-        # --- Get validation data
         X_train, X_valid, y_train, y_valid = train_test_split(
             X,
             y,
             test_size=self.valid_frac,
+            random_state=self._random_state,
             shuffle=True,
             stratify=y,
         )
 
-        # --- Map labels to int
-        self.label_encoder_ = LabelEncoder().fit(y)
         y_train = self.label_encoder_.transform(y_train)
         y_valid = self.label_encoder_.transform(y_valid)
 
-        # --- To Tensor
+        self.device_: Literal["cuda", "mps", "cpu"]
+
+        if self.device == "auto":
+            if torch.cuda.is_available():
+                self.device_ = "cuda"
+            elif torch.mps.is_available():
+                self.device_ = "mps"
+            else:
+                self.device_ = "cpu"
+        else:
+            if self.device == "cuda" and not torch.cuda.is_available():
+                raise ValueError(f"{self.device=} passed but CUDA not available!")
+            if self.device == "mps" and not torch.mps.is_available():
+                raise ValueError(f"{self.device=} passed but MPS not available!")
+            self.device_ = self.device
+
+        torch.manual_seed(self._random_state.randint(2**32))
+
         X_train = torch.tensor(X_train).float()
         X_valid = torch.tensor(X_valid).float()
         y_train = torch.tensor(y_train)
         y_valid = torch.tensor(y_valid)
 
-        # --- Build network
-        self._build()
-
-        # --- Create dataloaders
         dataloaders = {
-            "train": DataLoader(TensorDataset(X_train, y_train), batch_size=self.batch_size, shuffle=True),
-            "valid": DataLoader(TensorDataset(X_valid, y_valid), batch_size=self.batch_size, shuffle=True),
+            "train": DataLoader(TensorDataset(X_train, y_train), self.batch_size, shuffle=True),
+            "valid": DataLoader(TensorDataset(X_valid, y_valid), self.batch_size, shuffle=True),
         }
-        # --- Train clf
-        self.acc_history_ = _train_clf(
-            model=self,
-            device=self.device,
+
+        if len(X_train) - 1 < self.num_bins:
+            self._num_bins = len(X_train) - 1
+            warn(
+                f"num_bins must be more than 1, but less than len(X_train), "
+                f"however: {self.num_bins=}, {len(X_train)=}. "
+                f"Setting num_bins to len(X_train) - 1."
+            )
+        else:
+            self._num_bins = len(X_train) - 1
+
+        self._model: nn.Module = nn.Sequential(
+            # We use the default version recommended in the README
+            # https://github.com/yandex-research/rtdl-num-embeddings/tree/main/package#which-embeddings-to-choose
+            PiecewiseLinearEmbeddings(
+                bins=compute_bins(X_train, n_bins=self._num_bins),
+                d_embedding=self.dim_emb,
+                activation=False,
+                version="B",
+            ),
+            nn.Flatten(1),
+            MLP(
+                dim_in=self.dim_emb * self.n_features_in_,
+                dim_out=self.n_classes_,
+                dim_hid=self.dim_hid,
+                num_hid=self.num_hid,
+                dropout=self.dropout,
+            ),
+        )
+
+        self.acc_history_, self.n_iter_ = _train_model(
+            model=self._model,
+            device=self.device_,
             dataloaders=dataloaders,
             lr=self.lr,
             max_iter=self.max_iter,
             patience=self.patience,
+            regression=False,
             verbose=self.verbose,
         )
 
         return self
 
-    @torch.no_grad()
     def predict(self, X: NDArray) -> NDArray:
-        # --- Perform basic sanity checks
+        check_is_fitted(self)
+        X = validate_data(self, X, reset=False, accept_sparse=False, accept_large_sparse=False)
         X = np.array(X)
-        check_array(X)
 
-        # --- Predict
-        self.eval()
-
-        logits = self(torch.tensor(X).float().to(self.device))
-        logits = logits.to("cpu").numpy()
-        labels = np.argmax(logits, axis=1)
-
+        self._model.to(self.device_)
+        self._model.eval()
+        with torch.no_grad():
+            logits = self._model(torch.tensor(X).float().to(self.device_))
+            logits = logits.to("cpu").numpy()
+            labels = np.argmax(logits, axis=1)
         return self.label_encoder_.inverse_transform(labels)
 
 
 if __name__ == "__main__":
+    from warnings import simplefilter
     from sklearn.utils.estimator_checks import check_estimator
 
-    check_estimator(
-        BinnedMLPClassifier(
-            dim_emb=8,
-            dim_hid=256,
-            num_hid=2,
-            num_bins=8,
-            dropout=0.1,
-            lr=1e-3,
-            max_iter=200,
-            batch_size=256,
-            valid_frac=0.2,
-            patience=50,
-        )
-    )
+    simplefilter("ignore", UserWarning)
+    check_estimator(MLPClassifier())
+    check_estimator(QPLEMLPClassifier())
