@@ -13,13 +13,13 @@ from tqdm import trange
 from torch import Tensor
 from torch.utils.data import DataLoader, TensorDataset
 
-from rtdl_num_embeddings import PiecewiseLinearEmbeddings, compute_bins
+from rtdl_num_embeddings import compute_bins, PiecewiseLinearEncoding
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.utils._param_validation import Interval, StrOptions
+from sklearn.utils._param_validation import Interval, StrOptions, validate_parameter_constraints
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import check_random_state, check_is_fitted, validate_data
 
@@ -129,30 +129,25 @@ def _train_clf(
 
 
 class QMLPClassifier(ClassifierMixin, BaseEstimator):
-    """Multilayer Perceptron classifier with optional Quantile Piecewise Linear Embedding.
+    """
+    Multilayer Perceptron classifier with optional quantile-based Piecewise Linear Encoding (PLE).
 
-    This class implements the MLP classifier with optional embedding layer based on quantile binning
-    and piecewise linear embedding proposed in [1].
+    This class implements the MLP classifier with optional quantile-based Piecewise Linear Encoding
+    layer proposed in [1]. To see the exact architecture of the used MLP scroll down to Diagram
+    section.
 
     Parameters
     ----------
-    dim_hid : int, default=256,
+    dim_hid : int,
         Size of each hidden layer of the MLP. For simplicity we assume that every hidden layer has
         the same size.
 
-    dim_emb : int, default=8,
-        Size of the embedding of *each* feature in the Qunantile PLE. The output of the embedding
-        layer has shape `(n_samples, n_features * dim_emb)`. Only effective when
-        `use_quantile_embedding=True`.
-
-    n_hid : int, default=2,
+    n_hid : int,
         Number of hidden layers. The total number of layers in the MLP is `n_hid + 2`.
-        Additionally there are `n_features` linear layers of size `(n_bins, dim_emb)` in the
-        embedding layer.
 
-    n_bins : int, default=48,
-        Number of bins to use when discretizing the features based on quantiles for the Quantile
-        Piecewise Linear Embedding. Only effective when `use_quantile_embedding=True`.
+    max_bins : int,
+        Max number of bins to use when discretizing the features based on quantiles for the
+        quantile-based Piecewise Linear Encoding. Only effective when `use_quantile_encoding=True`.
 
     dropout : float, default=0.2,
         Dropout probability.
@@ -179,7 +174,7 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
         `n_iter_no_change` consecutive iterations, convergence is considered to be reached and
         training stops.
 
-    n_iter_no_change : int, default=40,
+    n_iter_no_change : int,
         Maximum number of epochs to not meet tol improvement.
 
     early_stopping : bool, default=True,
@@ -187,10 +182,10 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
         If set to true, it will terminate training when validation score is not improving by at
         least `tol` for `n_iter_no_change` consecutive epochs
 
-    use_quantile_embedding : bool, default=True,
-        Whether to user Quantile Piecewise Linear Embedding layer described in [1]. If set to `True`
-        it will first compute the appropriate bins on the training set (after setting aside the
-        validation set) and then add embedding layer to the model.
+    use_quantile_encoding : bool, default=True,
+        Whether to use quantile-based Piecewise Linear Encoding layer described in [1]. If set to
+        `True` it will first compute the appropriate bins on the training set (after setting aside
+        the validation set) and then add encoding layer to the model.
 
     random_state : int, RandomState instance, default=None,
         Determines random number generation for weights and bias initialization, train-test split,
@@ -200,7 +195,7 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
         Whether to print progress messages to stdout.
 
     device : {"cpu", "cuda", "mps", "auto"}, default="auto",
-        `torch.device` which is used for inference and training. If "auto" then the device is chosen
+        `torch.device` used for inference and training. If "auto" then the device is chosen
         automatically based on the availability in the following order "cuda", "mps", "cpu".
 
     Attributes
@@ -231,12 +226,10 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
     [Input(n_samples, n_features)]
         |
     ***** optional
-    | [Quantile Piecewise Linear Embedding(n_bins, dim_emb)]
+    | [qPLE(n_bins)]
     *****
         |
-    [Flatten(start_dim=1)]
-        |
-    [Linear(dim_emb * n_features, dim_hid)]
+    [Linear(dim_hid)]
         |
     [Batchnorm(dim_hid)]
         |
@@ -245,7 +238,7 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
     [Dropout]
         |
     ***** n_hid x
-    | [Linear(dim_hid, dim_hid)]
+    | [Linear(dim_hid)]
     |     |
     | [Batchnorm(dim_hid)]
     |     |
@@ -254,7 +247,7 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
     | [Dropout]
     *****
         |
-    [Linear(dim_hid, n_classes)]
+    [Linear(n_classes)]
         |
     [Output(n_samples, n_classes)]
     ```
@@ -262,8 +255,8 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
     Notes
     -----
     This class uses PyTorch library to implement and train the network itself. Additionally, for the
-    Quantile Piecewise Linear Embedding layer we use the code published by the authors of the paper
-    [1] which is available here: https://github.com/yandex-research/rtdl-num-embeddings.
+    quantile-based Piecewise Linear Encoding layer we use the code published by the authors of the
+    paper [1] which is available here: https://github.com/yandex-research/rtdl-num-embeddings.
 
     TODO: Write about philosophy of sane defaults -- not too much tweaks!!!
 
@@ -276,7 +269,6 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
 
     _parameter_constraints = {
         "dim_hid": [Interval(Integral, 1, None, closed="left")],
-        "dim_emb": [Interval(Integral, 1, None, closed="left")],
         "n_hid": [Interval(Integral, 1, None, closed="left")],
         "n_bins": [Interval(Integral, 1, None, closed="neither")],
         "dropout": [Interval(Real, 0, 1, closed="left")],
@@ -287,7 +279,7 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
         "validation_fraction": [Interval(Real, 0, 1, closed="left")],
         "tol": [Interval(Real, 0, None, closed="left")],
         "n_iter_no_change": [Interval(Integral, 1, None, closed="left")],
-        "use_quantile_embedding": ["boolean"],
+        "use_quantile_encoding": ["boolean"],
         "random_state": ["random_state"],
         "verbose": ["boolean"],
         "early_stopping": ["boolean"],
@@ -296,20 +288,19 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
 
     def __init__(
         self,
-        dim_hid: int = 256,
-        dim_emb: int = 8,
-        n_hid: int = 2,
-        n_bins: int = 48,
-        dropout: float = 0.2,
-        learning_rate: float = 3e-4,
-        weight_decay: float = 0.01,
+        dim_hid: int = 100,
+        n_hid: int = 1,
+        max_bins: int = 48,
+        dropout: float = 0.5,
+        learning_rate: float = 1e-3,
+        weight_decay: float = 1e-2,
         max_iter: int = 200,
         batch_size: int = 256,
-        validation_fraction: float = 0.2,
+        validation_fraction: float = 0.1,
         tol: float = 1e-4,
         n_iter_no_change: int = 40,
         early_stopping: bool = True,
-        use_quantile_embedding: bool = True,
+        use_quantile_encoding: bool = True,
         random_state: Optional[int | RandomState] = None,
         verbose: bool = False,
         device: Literal["cpu", "cuda", "mps", "auto"] = "auto",
@@ -317,9 +308,8 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
         super().__init__()
 
         self.dim_hid: int = dim_hid
-        self.dim_emb: int = dim_emb
         self.n_hid: int = n_hid
-        self.n_bins: int = n_bins
+        self.max_bins: int = max_bins
 
         self.learning_rate: float = learning_rate
         self.weight_decay: float = weight_decay
@@ -330,34 +320,13 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
         self.tol: float = tol
         self.n_iter_no_change: int = n_iter_no_change
         self.early_stopping: bool = early_stopping
-        self.use_quantile_embedding: bool = use_quantile_embedding
+        self.use_quantile_encoding: bool = use_quantile_encoding
 
         self.random_state: Optional[int | RandomState] = random_state
         self.device: Literal["cpu", "cuda", "mps", "auto"] = device
         self.verbose: bool = verbose
 
-    def fit(self, X, y):
-        X, y = validate_data(self, X, y, accept_sparse=False, reset=True)
-        check_classification_targets(y)
-        X, y = np.array(X), np.array(y)
-
-        self._label_encoder = LabelEncoder().fit(y)
-        self.classes_ = self._label_encoder.classes_
-
-        self._random_state: RandomState = check_random_state(self.random_state)
-
-        X_train, X_valid, y_train, y_valid = train_test_split(
-            X,
-            y,
-            test_size=self.validation_fraction,
-            random_state=self._random_state,
-            shuffle=True,
-            stratify=y,
-        )
-
-        y_train = self._label_encoder.transform(y_train)
-        y_valid = self._label_encoder.transform(y_valid)
-
+    def _set_device(self):
         self.device_: Literal["cuda", "mps", "cpu"]
 
         if self.device == "auto":
@@ -374,6 +343,38 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
                 raise ValueError(f"{self.device=} passed but MPS not available!")
             self.device_ = self.device
 
+    def fit(self, X, y):
+        # --- Perform sanity checks and make sure we are using ndarrays
+        validate_parameter_constraints(
+            self._parameter_constraints,
+            self.get_params(),
+            self.__class__.__name__,
+        )
+        X, y = validate_data(self, X, y, accept_sparse=False, reset=True)
+        check_classification_targets(y)
+        X, y = np.array(X), np.array(y)
+
+        # --- Turn seed into a RandomState instance
+        self._random_state: RandomState = check_random_state(self.random_state)
+
+        # --- Split data into train and validation sets for monitoring and early stopping
+        X_train, X_valid, y_train, y_valid = train_test_split(
+            X,
+            y,
+            test_size=self.validation_fraction,
+            random_state=self._random_state,
+            shuffle=True,
+            stratify=y,
+        )
+
+        # --- Encode labels
+        self._label_encoder = LabelEncoder().fit(y)
+        self.classes_ = self._label_encoder.classes_
+        y_train = self._label_encoder.transform(y_train)
+        y_valid = self._label_encoder.transform(y_valid)
+
+        # --- Prepare data and model for training using PyTorch
+        self._set_device()
         torch.manual_seed(self._random_state.randint(2**32))
 
         X_train = torch.tensor(X_train).float()
@@ -386,19 +387,13 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
             "valid": DataLoader(TensorDataset(X_valid, y_valid), self.batch_size, shuffle=True),
         }
 
-        if self.use_quantile_embedding:
+        if self.use_quantile_encoding:
+            bins = compute_bins(X=X_train, n_bins=self.max_bins)
+            total_n_bins = sum(len(b) - 1 for b in bins)
             self._model: nn.Module = nn.Sequential(
-                PiecewiseLinearEmbeddings(
-                    bins=compute_bins(X=X_train, n_bins=self.n_bins),
-                    d_embedding=self.dim_emb,
-                    # We use the default version recommended in the README here:
-                    # https://github.com/yandex-research/rtdl-num-embeddings/tree/main/package#piecewise-linear-encoding--embeddings
-                    activation=False,
-                    version="B",
-                ),
-                nn.Flatten(start_dim=1),
+                PiecewiseLinearEncoding(bins),
                 _TorchMLP(
-                    dim_in=self.dim_emb * self.n_features_in_,
+                    dim_in=total_n_bins,
                     dim_out=len(self.classes_),
                     dim_hid=self.dim_hid,
                     n_hid=self.n_hid,
@@ -414,6 +409,7 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
                 dropout=self.dropout,
             )
 
+        # --- Train model
         self.acc_history_, self.n_iter_ = _train_clf(
             model=self._model,
             device=self.device_,
@@ -447,4 +443,4 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
 if __name__ == "__main__":
     from sklearn.utils.estimator_checks import check_estimator
 
-    check_estimator(QMLPClassifier(n_bins=4))
+    check_estimator(QMLPClassifier(max_bins=4, validation_fraction=0.5))
