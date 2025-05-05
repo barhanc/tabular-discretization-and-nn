@@ -155,7 +155,7 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
     lr : float,
         Learning rate.
 
-    weight_decay : float, default=0.01,
+    weight_decay : float,
         Strength of the L2 regularization term used in the AdamW optimizer.
 
     max_iter : int,
@@ -169,7 +169,7 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
         The proportion of training data to set aside as validation set for early stopping. Must be
         between 0 and 1.
 
-    tol : float, default=1e-4,
+    tol : float,
         Tolerance for the optimization. When the loss is not improving by at least `tol` for
         `n_iter_no_change` consecutive iterations, convergence is considered to be reached and
         training stops.
