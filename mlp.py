@@ -128,7 +128,7 @@ def _train_clf(
     return acc_history, iter + 1
 
 
-class QMLPClassifier(ClassifierMixin, BaseEstimator):
+class MLPClassifier(ClassifierMixin, BaseEstimator):
     """
     Multilayer Perceptron classifier with optional quantile-based Piecewise Linear Encoding (PLE).
 
@@ -288,7 +288,7 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
 
     def __init__(
         self,
-        dim_hid: int = 100,
+        dim_hid: int = 256,
         n_hid: int = 1,
         max_bins: int = 48,
         dropout: float = 0.5,
@@ -443,4 +443,4 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
 if __name__ == "__main__":
     from sklearn.utils.estimator_checks import check_estimator
 
-    check_estimator(QMLPClassifier(max_bins=4, validation_fraction=0.5))
+    check_estimator(MLPClassifier(max_bins=4, validation_fraction=0.5))
