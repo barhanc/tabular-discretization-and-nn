@@ -149,23 +149,23 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
         Max number of bins to use when discretizing the features based on quantiles for the
         quantile-based Piecewise Linear Encoding. Only effective when `use_quantile_encoding=True`.
 
-    dropout : float, default=0.2,
+    dropout : float,
         Dropout probability.
 
-    lr : float, default=3e-4,
+    lr : float,
         Learning rate.
 
     weight_decay : float, default=0.01,
         Strength of the L2 regularization term used in the AdamW optimizer.
 
-    max_iter : int, default=200,
+    max_iter : int,
         Maximum number of iterations. The optimizer iterates until convergence (determined by `tol`)
         or this number of iterations
 
-    batch_size : int, default=256,
+    batch_size : int,
         Size of minibatches.
 
-    validation_fraction : float, default=0.2,
+    validation_fraction : float,
         The proportion of training data to set aside as validation set for early stopping. Must be
         between 0 and 1.
 
@@ -177,24 +177,24 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
     n_iter_no_change : int,
         Maximum number of epochs to not meet tol improvement.
 
-    early_stopping : bool, default=True,
+    early_stopping : bool,
         Whether to use early stopping to terminate training when validation score is not improving.
         If set to true, it will terminate training when validation score is not improving by at
         least `tol` for `n_iter_no_change` consecutive epochs
 
-    use_quantile_encoding : bool, default=True,
+    use_quantile_encoding : bool,
         Whether to use quantile-based Piecewise Linear Encoding layer described in [1]. If set to
         `True` it will first compute the appropriate bins on the training set (after setting aside
         the validation set) and then add encoding layer to the model.
 
-    random_state : int, RandomState instance, default=None,
+    random_state : int, RandomState instance,
         Determines random number generation for weights and bias initialization, train-test split,
         and batch sampling. Pass an int for reproducible results across multiple function calls.
 
-    verbose : bool, default=False,
+    verbose : bool,
         Whether to print progress messages to stdout.
 
-    device : {"cpu", "cuda", "mps", "auto"}, default="auto",
+    device : {"cpu", "cuda", "mps", "auto"},
         `torch.device` used for inference and training. If "auto" then the device is chosen
         automatically based on the availability in the following order "cuda", "mps", "cpu".
 
