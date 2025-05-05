@@ -258,7 +258,7 @@ class QMLPClassifier(ClassifierMixin, BaseEstimator):
     quantile-based Piecewise Linear Encoding layer we use the code published by the authors of the
     paper [1] which is available here: https://github.com/yandex-research/rtdl-num-embeddings.
 
-    TODO: Write about philosophy of sane defaults -- not too much tweaks!!!
+    TODO: Write about sane defaults...
 
     References
     ----------
