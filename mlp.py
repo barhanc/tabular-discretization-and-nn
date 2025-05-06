@@ -162,8 +162,9 @@ class MLPClassifier(ClassifierMixin, BaseEstimator):
         Maximum number of iterations. The optimizer iterates until convergence (determined by `tol`)
         or this number of iterations
 
-    batch_size : int,
-        Size of minibatches.
+    batch_size : int, "auto",
+        Size of the minibatches. When set to "auto" then `batch_size=min(n_samples, 256)` if
+        `n_samples < 50_000` and `1024` otherwise.
 
     validation_fraction : float,
         The proportion of training data to set aside as validation set for early stopping. Must be
@@ -212,6 +213,9 @@ class MLPClassifier(ClassifierMixin, BaseEstimator):
 
     n_iter_ : int
         The number of iterations the optimizer has run.
+
+    batch_size_ : int
+        Final batch size used for inference and training.
 
     acc_history_ : dict
         Dictionary with keys `"train"` and `"valid"` which contains the history of accuracy scores
@@ -275,7 +279,7 @@ class MLPClassifier(ClassifierMixin, BaseEstimator):
         "learning_rate": [Interval(Real, 0, None, closed="left")],
         "weight_decay": [Interval(Real, 0, None, closed="left")],
         "max_iter": [Interval(Integral, 1, None, closed="left")],
-        "batch_size": [Interval(Integral, 1, None, closed="left")],
+        "batch_size": [StrOptions({"auto"}), Interval(Integral, 1, None, closed="left")],
         "validation_fraction": [Interval(Real, 0, 1, closed="left")],
         "tol": [Interval(Real, 0, None, closed="left")],
         "n_iter_no_change": [Interval(Integral, 1, None, closed="left")],
@@ -295,7 +299,7 @@ class MLPClassifier(ClassifierMixin, BaseEstimator):
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-2,
         max_iter: int = 200,
-        batch_size: int = 256,
+        batch_size: int | Literal["auto"] = "auto",
         validation_fraction: float = 0.1,
         tol: float = 1e-4,
         n_iter_no_change: int = 40,
@@ -382,9 +386,19 @@ class MLPClassifier(ClassifierMixin, BaseEstimator):
         y_train = torch.tensor(y_train)
         y_valid = torch.tensor(y_valid)
 
+        if self.batch_size == "auto":
+            if len(X) >= 50_000:
+                self.batch_size_ = 1024
+            else:
+                self.batch_size_ = min(len(X), 256)
+        else:
+            if self.batch_size > len(X):
+                raise ValueError(f"{self.batch_size=} is greater then {len(X)=}")
+            self.batch_size_ = self.batch_size
+
         dataloaders = {
-            "train": DataLoader(TensorDataset(X_train, y_train), self.batch_size, shuffle=True),
-            "valid": DataLoader(TensorDataset(X_valid, y_valid), self.batch_size, shuffle=True),
+            "train": DataLoader(TensorDataset(X_train, y_train), self.batch_size_, shuffle=True),
+            "valid": DataLoader(TensorDataset(X_valid, y_valid), self.batch_size_, shuffle=True),
         }
 
         if self.use_quantile_encoding:
