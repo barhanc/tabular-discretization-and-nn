@@ -393,7 +393,7 @@ class MLPClassifier(ClassifierMixin, BaseEstimator):
                 self.batch_size_ = min(len(X), 256)
         else:
             if self.batch_size > len(X):
-                raise ValueError(f"{self.batch_size=} is greater then {len(X)=}")
+                raise ValueError(f"{self.batch_size=} is greater than {len(X)=}")
             self.batch_size_ = self.batch_size
 
         dataloaders = {
